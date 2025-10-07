@@ -1,0 +1,89 @@
+# Baseline Model Configuration
+# Simple feedforward neural network for establishing performance baseline
+
+# Data paths
+data:
+  train_features: "data/processed/train_features.pkl"
+  train_labels: "data/processed/train_labels.pkl"
+  val_features: "data/processed/val_features.pkl"
+  val_labels: "data/processed/val_labels.pkl"
+  test_features: "data/processed/test_features.pkl"
+  test_labels: "data/processed/test_labels.pkl"
+
+# Model architecture
+model:
+  name: "BaselineFFN"
+  input_dim: 42  # Number of features after preprocessing
+  hidden_dims: [256, 128, 64]  # Hidden layer dimensions
+  num_classes: 10  # 10 attack types (including Benign)
+  dropout: 0.3  # Dropout rate for regularization
+  activation: "relu"  # Activation function
+
+# Training parameters
+training:
+  batch_size: 64  # Batch size (optimized for laptop)
+  epochs: 50  # Maximum number of epochs
+  learning_rate: 0.001  # Initial learning rate
+  early_stopping_patience: 10  # Stop if no improvement for N epochs
+  class_weights: true  # Use class weights for imbalanced data
+  class_weight_method: "balanced"  # 'balanced' or 'inverse_frequency'
+
+# Optimizer configuration
+optimizer:
+  name: "adam"  # Optimizer type (adam, sgd, adamw)
+  weight_decay: 0.0001  # L2 regularization
+  betas: [0.9, 0.999]  # Adam betas
+  eps: 1.0e-8  # Adam epsilon
+
+# Learning rate scheduler
+scheduler:
+  name: "reduce_on_plateau"  # Type of scheduler
+  mode: "min"  # Minimize validation loss
+  factor: 0.5  # Reduce LR by this factor
+  patience: 5  # Wait N epochs before reducing
+  min_lr: 1.0e-6  # Minimum learning rate
+
+# Loss function
+loss:
+  name: "cross_entropy"  # Loss function type
+  label_smoothing: 0.0  # Label smoothing (0.0 = disabled)
+
+# DataLoader settings
+dataloader:
+  num_workers: 4  # Number of worker processes (use 0 if issues)
+  pin_memory: true  # Pin memory for faster GPU transfer
+  persistent_workers: false  # Keep workers alive between epochs
+
+# Logging and checkpointing
+logging:
+  log_interval: 100  # Log every N batches
+  tensorboard: true  # Use TensorBoard logging
+  tensorboard_dir: "runs/baseline"  # TensorBoard log directory
+  save_dir: "saved_models"  # Directory to save models
+  save_best_only: true  # Only save best model
+  metric_to_monitor: "val_f1_macro"  # Metric for best model selection
+
+# Evaluation
+evaluation:
+  compute_confusion_matrix: true  # Compute confusion matrix
+  save_predictions: true  # Save model predictions
+  per_class_metrics: true  # Compute per-class metrics
+
+# Reproducibility
+seed: 42  # Random seed for reproducibility
+
+# Device
+device: "cuda"  # 'cuda' or 'cpu' (auto-detected if CUDA available)
+
+# Class names (for visualization)
+class_names:
+  0: "Benign"
+  1: "Analysis"
+  2: "Backdoor"
+  3: "DoS"
+  4: "Exploits"
+  5: "Fuzzers"
+  6: "Generic"
+  7: "Reconnaissance"
+  8: "Shellcode"
+  9: "Worms"
