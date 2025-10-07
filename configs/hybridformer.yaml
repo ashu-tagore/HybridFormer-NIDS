@@ -1,0 +1,93 @@
+# HybridFormer Training Configuration
+
+# Model Configuration
+model:
+  name: "hybridformer"
+  num_classes: 10
+  dropout: 0.3
+
+# Data Configuration
+data:
+  data_dir: "data/processed"
+  branch_allocation: "data/processed/branch_feature_allocation.json"
+  batch_size: 64
+  num_workers: 4
+  mode: "branch"  # Use branch-specific features
+
+# Training Configuration
+training:
+  epochs: 100
+  device: "cuda"  # "cuda" or "cpu"
+  seed: 42
+
+  # Optimizer
+  optimizer:
+    type: "adamw"
+    lr: 0.0003  # 3e-4
+    weight_decay: 0.0001  # 1e-4
+    betas: [0.9, 0.999]
+
+  # Learning Rate Scheduler
+  scheduler:
+    type: "cosine"  # cosine annealing with warmup
+    warmup_epochs: 5
+    min_lr: 0.000001  # 1e-6
+
+  # Loss Function
+  loss:
+    type: "cross_entropy"  # Standard CE for now, focal loss later
+
+  # Early Stopping
+  early_stopping:
+    enabled: true
+    patience: 15
+    metric: "val_macro_f1"  # Monitor macro F1 score
+    mode: "max"  # Maximize macro F1
+
+  # Gradient Clipping
+  grad_clip:
+    enabled: true
+    max_norm: 1.0
+
+# Logging Configuration
+logging:
+  log_dir: "logs/hybridformer"
+  save_dir: "saved_models/hybridformer"
+  tensorboard: true
+  log_interval: 100  # Log every 100 batches
+
+  # Checkpointing
+  save_best: true
+  save_last: true
+  save_interval: null  # Only save best and last
+
+# Evaluation Configuration
+evaluation:
+  metrics:
+    - "accuracy"
+    - "macro_f1"
+    - "weighted_f1"
+    - "per_class_f1"
+    - "confusion_matrix"
+
+  # Per-class metrics for analysis
+  class_names:
+    0: "Benign"
+    1: "Analysis"
+    2: "Backdoor"
+    3: "DoS"
+    4: "Exploits"
+    5: "Fuzzers"
+    6: "Generic"
+    7: "Reconnaissance"
+    8: "Shellcode"
+    9: "Worms"
+
+# Experiment Tracking
+experiment:
+  name: "hybridformer_baseline"
+  description: "Simple concatenation fusion baseline"
+  tags:
+    - "week4"
+    - "baseline"
+    - "concatenation"

@@ -1,304 +1,222 @@
 """
-Training script for NIDS Baseline Model
-
-Usage:
-    python train.py
-    python train.py --config configs/baseline.yaml
-    python train.py --epochs 30 --batch-size 128
-
-This script trains the baseline feedforward neural network
-and saves the best model based on validation F1 score.
+Main training script for HybridFormer NIDS model.
 """
 
 import argparse
+import yaml
 import torch
-import torch.nn as nn
-from datetime import datetime
 from pathlib import Path
 
-from src import (
-    Config,
-    get_data_loaders,
-    compute_class_weights,
-    BaselineFFN,
-    Trainer,
-    set_seed,
-    get_device,
-    print_model_summary
-)
+from src.hybridformer import HybridFormer
+from src.dataset import create_dataloaders
+from src.trainer import Trainer
+from src.utils import set_seed
+import src.metrics as metrics_module
 
 
-def parse_args():
-    """Parse command line arguments."""
-    parser = argparse.ArgumentParser(description='Train Baseline NIDS Model')
+def load_config(config_path):
+    """Load configuration from YAML file."""
+    with open(config_path, 'r', encoding='utf-8') as f:
+        config = yaml.safe_load(f)
+    return config
 
-    parser.add_argument(
-        '--config',
-        type=str,
-        default='configs/baseline.yaml',
-        help='Path to configuration file'
+
+def create_model(config):
+    """Create HybridFormer model from config."""
+    model = HybridFormer(
+        num_classes=config['model']['num_classes'],
+        dropout=config['model']['dropout']
     )
-
-    parser.add_argument(
-        '--epochs',
-        type=int,
-        default=None,
-        help='Number of epochs (overrides config)'
-    )
-
-    parser.add_argument(
-        '--batch-size',
-        type=int,
-        default=None,
-        help='Batch size (overrides config)'
-    )
-
-    parser.add_argument(
-        '--device',
-        type=str,
-        default=None,
-        choices=['cuda', 'cpu'],
-        help='Device to use (overrides config)'
-    )
-
-    parser.add_argument(
-        '--lr',
-        type=float,
-        default=None,
-        help='Learning rate (overrides config)'
-    )
-
-    return parser.parse_args()
+    return model
 
 
-def main():
-    """Main training function."""
+def create_optimizer(model, config):
+    """Create optimizer from config."""
+    optimizer_config = config['training']['optimizer']
 
-    # Print header
-    print("\n" + "="*70)
-    print(" "*20 + "BASELINE MODEL TRAINING")
-    print("="*70)
-    print(f"Training started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-
-    # Parse arguments
-    args = parse_args()
-
-    # Load configuration
-    print(f"Loading configuration from: {args.config}")
-    config = Config(args.config)
-    print("✓ Configuration loaded\n")
-
-    # Override config with command line arguments
-    epochs = args.epochs if args.epochs else config.training.epochs
-    batch_size = args.batch_size if args.batch_size else config.training.batch_size
-    device = args.device if args.device else config.get('device', 'cuda')
-    learning_rate = args.lr if args.lr else config.training.learning_rate
-
-    print("Training Configuration:")
-    print(f"  Epochs: {epochs}")
-    print(f"  Batch size: {batch_size}")
-    print(f"  Learning rate: {learning_rate}")
-    print(f"  Device: {device}")
-    print(f"  Early stopping patience: {config.training.early_stopping_patience}\n")
-
-    # Set random seed for reproducibility
-    seed = config.get('seed', 42)
-    set_seed(seed)
-    print(f"✓ Random seed set to {seed}\n")
-
-    # Create data loaders
-    print("="*70)
-    print("LOADING DATA")
-    print("="*70)
-
-    loaders = get_data_loaders(
-        train_features_path=config.data.train_features,
-        train_labels_path=config.data.train_labels,
-        val_features_path=config.data.val_features,
-        val_labels_path=config.data.val_labels,
-        test_features_path=config.data.test_features,
-        test_labels_path=config.data.test_labels,
-        batch_size=batch_size,
-        num_workers=config.get('dataloader.num_workers', 4),
-        pin_memory=config.get('dataloader.pin_memory', True)
-    )
-
-    train_loader = loaders['train']
-    val_loader = loaders['val']
-    test_loader = loaders['test']
-    train_dataset = loaders['train_dataset']
-
-    print(f"\n✓ Data loaders created successfully")
-    print(f"  Training samples: {len(train_dataset):,}")
-    print(f"  Training batches: {len(train_loader):,}")
-    print(f"  Validation batches: {len(val_loader):,}")
-    print(f"  Test batches: {len(test_loader):,}\n")
-
-    # Compute class weights
-    print("Computing class weights for imbalanced data...")
-    class_weights = None
-    if config.get('training.class_weights', True):
-        class_weights = compute_class_weights(
-            train_dataset.labels,
-            num_classes=config.model.num_classes,
-            method=config.get('training.class_weight_method', 'balanced')
-        )
-        print("✓ Class weights computed\n")
-
-    # Create model
-    print("="*70)
-    print("INITIALIZING MODEL")
-    print("="*70)
-
-    model = BaselineFFN(
-        input_dim=config.model.input_dim,
-        hidden_dims=config.model.hidden_dims,
-        num_classes=config.model.num_classes,
-        dropout=config.model.dropout,
-        activation=config.get('model.activation', 'relu')
-    )
-
-    print_model_summary(model)
-
-    # Setup training components
-    print("Setting up training components...")
-
-    # Get device
-    device_obj = get_device(prefer_cuda=(device == 'cuda'))
-
-    # Loss function
-    if class_weights is not None:
-        criterion = nn.CrossEntropyLoss(
-            weight=class_weights.to(device_obj),
-            label_smoothing=config.get('loss.label_smoothing', 0.0)
-        )
-    else:
-        criterion = nn.CrossEntropyLoss(
-            label_smoothing=config.get('loss.label_smoothing', 0.0)
-        )
-
-    print(f"✓ Loss function: CrossEntropyLoss")
-
-    # Optimizer
-    optimizer_name = config.get('optimizer.name', 'adam').lower()
-    weight_decay = config.get('optimizer.weight_decay', 0.0001)
-
-    if optimizer_name == 'adam':
-        optimizer = torch.optim.Adam(
-            model.parameters(),
-            lr=learning_rate,
-            weight_decay=weight_decay,
-            betas=config.get('optimizer.betas', [0.9, 0.999]),
-            eps=config.get('optimizer.eps', 1e-8)
-        )
-    elif optimizer_name == 'adamw':
+    if optimizer_config['type'].lower() == 'adamw':
         optimizer = torch.optim.AdamW(
             model.parameters(),
-            lr=learning_rate,
-            weight_decay=weight_decay
+            lr=optimizer_config['lr'],
+            weight_decay=optimizer_config['weight_decay'],
+            betas=tuple(optimizer_config['betas'])
         )
-    elif optimizer_name == 'sgd':
-        optimizer = torch.optim.SGD(
+    elif optimizer_config['type'].lower() == 'adam':
+        optimizer = torch.optim.Adam(
             model.parameters(),
-            lr=learning_rate,
-            weight_decay=weight_decay,
-            momentum=0.9
+            lr=optimizer_config['lr'],
+            weight_decay=optimizer_config['weight_decay']
         )
     else:
-        raise ValueError(f"Unknown optimizer: {optimizer_name}")
+        raise ValueError(f"Unknown optimizer: {optimizer_config['type']}")
 
-    print(f"✓ Optimizer: {optimizer_name.upper()}")
+    return optimizer
 
-    # Learning rate scheduler
-    scheduler = None
-    scheduler_name = config.get('scheduler.name', 'reduce_on_plateau')
 
-    if scheduler_name == 'reduce_on_plateau':
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer,
-            mode=config.get('scheduler.mode', 'min'),
-            factor=config.get('scheduler.factor', 0.5),
-            patience=config.get('scheduler.patience', 5),
-            min_lr=config.get('scheduler.min_lr', 1e-6)
-        )
-        print(f"✓ Scheduler: ReduceLROnPlateau\n")
+def create_scheduler(optimizer, config, steps_per_epoch):
+    """Create learning rate scheduler from config."""
+    scheduler_config = config['training']['scheduler']
+
+    if scheduler_config['type'].lower() == 'cosine':
+        warmup_epochs = scheduler_config['warmup_epochs']
+        total_epochs = config['training']['epochs']
+
+        # Warmup + cosine annealing
+        def lr_lambda(epoch):
+            if epoch < warmup_epochs:
+                return (epoch + 1) / warmup_epochs
+            else:
+                progress = (epoch - warmup_epochs) / (total_epochs - warmup_epochs)
+                return 0.5 * (1 + torch.cos(torch.tensor(progress * 3.14159)))
+
+        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+    else:
+        scheduler = None
+
+    return scheduler
+
+
+def create_criterion(config):
+    """Create loss function from config."""
+    loss_config = config['training']['loss']
+
+    if loss_config['type'].lower() == 'cross_entropy':
+        criterion = torch.nn.CrossEntropyLoss()
+    else:
+        raise ValueError(f"Unknown loss: {loss_config['type']}")
+
+    return criterion
+
+
+def main(config_args):
+    """Main training function."""
+    # Load configuration
+    config = load_config(config_args.config)
+    print(f"Loaded config from {config_args.config}")
+    print(f"Experiment: {config['experiment']['name']}")
+
+    # Set random seed for reproducibility
+    set_seed(config['training']['seed'])
+
+    # Create dataloaders
+    print("\nCreating dataloaders...")
+    train_loader, val_loader, test_loader = create_dataloaders(
+        data_dir=config['data']['data_dir'],
+        batch_size=config['data']['batch_size'],
+        num_workers=config['data']['num_workers'],
+        mode=config['data']['mode'],
+        branch_allocation_path=config['data']['branch_allocation']
+    )
+
+    print(f"Train: {len(train_loader.dataset)} samples")
+    print(f"Val: {len(val_loader.dataset)} samples")
+    print(f"Test: {len(test_loader.dataset)} samples")
+
+    # Create model
+    print("\nCreating model...")
+    model = create_model(config)
+
+    # Count parameters
+    total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"Total parameters: {total_params:,}")
+
+    # Create optimizer, scheduler, and criterion
+    optimizer = create_optimizer(model, config)
+    steps_per_epoch = len(train_loader)
+    scheduler = create_scheduler(optimizer, config, steps_per_epoch)
+    criterion = create_criterion(config)
+
+    print(f"Optimizer: {config['training']['optimizer']['type']}")
+    print(f"Learning rate: {config['training']['optimizer']['lr']}")
+    print(f"Scheduler: {config['training']['scheduler']['type']}")
 
     # Create trainer
-    trainer_config = {
-        'num_classes': config.model.num_classes,
-        'early_stopping_patience': config.training.early_stopping_patience,
-        'use_tensorboard': config.get('logging.tensorboard', True),
-        'tensorboard_dir': config.get('logging.tensorboard_dir', 'runs/baseline'),
-        'save_dir': config.get('logging.save_dir', 'saved_models')
-    }
-
+    print("\nInitializing trainer...")
     trainer = Trainer(
         model=model,
         train_loader=train_loader,
         val_loader=val_loader,
-        criterion=criterion,
         optimizer=optimizer,
-        scheduler=scheduler,
-        device=device,
-        config=trainer_config
+        criterion=criterion,
+        device=config['training']['device'],
+        config=config,
+        scheduler=scheduler
     )
 
-    print("✓ Trainer initialized\n")
-
-    # Start training
+    # Train model
+    print("\nStarting training...")
     print("="*70)
-    print("STARTING TRAINING")
+    trainer.train(epochs=config['training']['epochs'])
+
+    # Evaluate on test set
+    print("\n" + "="*70)
+    print("Evaluating on test set...")
     print("="*70)
-    print(f"\nTraining for maximum {epochs} epochs...")
-    print(f"Progress will be displayed below.\n")
 
-    try:
-        history = trainer.train(epochs=epochs)
+    # Load best model
+    best_model_path = Path(config['logging']['save_dir']) / 'best_model.pth'
+    if best_model_path.exists():
+        print(f"Loading best model from {best_model_path}")
+        checkpoint = torch.load(best_model_path, weights_only=False)
+        model.load_state_dict(checkpoint['model_state_dict'])
 
-        # Training complete
-        print("\n" + "="*70)
-        print("TRAINING COMPLETE!")
-        print("="*70)
+    # Evaluate on test set
+    device = torch.device(config['training']['device'])
+    model = model.to(device)
+    model.eval()
 
-        print(f"\nBest Model:")
-        print(f"  Validation F1 Score: {trainer.best_val_f1:.4f}")
-        print(f"  Achieved at Epoch: {trainer.best_epoch + 1}")
+    all_preds = []
+    all_labels = []
 
-        print(f"\nFinal Metrics:")
-        print(f"  Train Loss: {history['train_loss'][-1]:.4f}")
-        print(f"  Val Loss: {history['val_loss'][-1]:.4f}")
-        print(f"  Train Accuracy: {history['train_acc'][-1]:.4f}")
-        print(f"  Val Accuracy: {history['val_acc'][-1]:.4f}")
-        print(f"  Val F1 (Macro): {history['val_f1_macro'][-1]:.4f}")
+    with torch.no_grad():
+        for batch in test_loader:
+            features, labels = batch
 
-        # Save final model
-        print(f"\nSaving final model...")
-        trainer.save_final_model()
+            # Move to device
+            if isinstance(features, dict):
+                features = {k: v.to(device) for k, v in features.items()}
+            else:
+                features = features.to(device)
+            labels = labels.to(device)
 
-        print(f"\nModel saved to: {trainer.save_dir}")
-        print(f"  Best model: baseline_best.pth")
-        print(f"  Final model: baseline_final.pth")
+            # Forward pass
+            outputs = model(features)
+            predictions = torch.argmax(outputs, dim=1)
 
-        print(f"\nTensorBoard logs: {trainer_config['tensorboard_dir']}")
-        print(f"To view training progress, run:")
-        print(f"  tensorboard --logdir {trainer_config['tensorboard_dir']}")
+            all_preds.append(predictions.cpu())
+            all_labels.append(labels.cpu())
 
-        print("\n" + "="*70)
-        print("SUCCESS! Training completed successfully.")
-        print("="*70)
-        print(f"Training ended: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+    # Concatenate all predictions and labels
+    all_preds = torch.cat(all_preds)
+    all_labels = torch.cat(all_labels)
 
-    except KeyboardInterrupt:
-        print("\n\nTraining interrupted by user!")
-        print("Saving current model state...")
-        trainer.save_final_model()
-        print("Model saved. You can resume training later.")
+    # Compute metrics
+    test_metrics = metrics_module.compute_metrics(all_preds, all_labels)
 
-    except Exception as e:
-        print(f"\n\nError during training: {e}")
-        print("Check logs for details.")
-        raise
+    print("\nTest Results:")
+    print(f"  Accuracy: {test_metrics['accuracy']*100:.2f}%")
+    print(f"  Macro F1: {test_metrics['macro_f1']*100:.2f}%")
+    print(f"  Weighted F1: {test_metrics['weighted_f1']*100:.2f}%")
+
+    print("\nPer-Class F1 Scores:")
+    class_names = config['evaluation']['class_names']
+    for class_idx, f1_score in enumerate(test_metrics['per_class_f1']):
+        class_name = class_names[class_idx]
+        print(f"  {class_name}: {f1_score*100:.2f}%")
+
+    print("\n" + "="*70)
+    print("Training complete!")
+    print("="*70)
 
 
 if __name__ == '__main__':
-    main()
+    parser = argparse.ArgumentParser(description='Train HybridFormer NIDS model')
+    parser.add_argument(
+        '--config',
+        type=str,
+        default='configs/hybridformer.yaml',
+        help='Path to config file'
+    )
+
+    args = parser.parse_args()
+    main(args)

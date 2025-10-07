@@ -1,0 +1,67 @@
+{
+  "cnn_branch": {
+    "num_features": 10,
+    "feature_indices": [
+      19,
+      15,
+      26,
+      20,
+      35,
+      41,
+      34,
+      36,
+      28,
+      7
+    ],
+    "description": "Local patterns, statistical features"
+  },
+  "transformer_branch": {
+    "num_features": 12,
+    "feature_indices": [
+      24,
+      17,
+      11,
+      0,
+      10,
+      12,
+      16,
+      18,
+      13,
+      14,
+      6,
+      39
+    ],
+    "description": "Sequential/temporal dependencies"
+  },
+  "graph_branch": {
+    "num_features": 20,
+    "feature_indices": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      8,
+      9,
+      21,
+      22,
+      23,
+      25,
+      27,
+      29,
+      30,
+      31,
+      32,
+      33,
+      37,
+      38,
+      40
+    ],
+    "description": "Network topology, relationships"
+  },
+  "metadata": {
+    "total_features": 42,
+    "allocation_strategy": "intelligent",
+    "creation_date": "2025-10-07T13:47:12.229467"
+  }
+}

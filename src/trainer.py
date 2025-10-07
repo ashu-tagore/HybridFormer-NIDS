@@ -1,349 +1,283 @@
 """
-Training loop orchestrator for NIDS project.
-
-This module provides the main Trainer class that handles:
-- Training loop with validation
-- Early stopping
-- Checkpoint saving
-- TensorBoard logging
-- Progress tracking
+Trainer class for NIDS models.
+Handles both baseline (flat features) and HybridFormer (dict features).
 """
 
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from pathlib import Path
-from typing import Optional, Dict, Any
-from tqdm import tqdm
 import logging
+from tqdm import tqdm
+import time
 
-from .metrics import MetricsCalculator
-from .utils import save_checkpoint, EarlyStopping, get_device
+from src.metrics import compute_metrics
+from src.utils import EarlyStopping, save_checkpoint
 
+# Setup logging
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
 class Trainer:
     """
-    Main training orchestrator for NIDS models.
+    Trainer class for NIDS models.
 
-    Handles complete training workflow including:
-    - Training and validation loops
-    - Metric computation
-    - Early stopping
-    - Model checkpointing
-    - TensorBoard logging
-
-    Args:
-        model: PyTorch model to train
-        train_loader: Training data loader
-        val_loader: Validation data loader
-        criterion: Loss function
-        optimizer: Optimizer
-        scheduler: Optional learning rate scheduler
-        device: Device to train on ('cuda' or 'cpu')
-        config: Configuration dictionary
-
-    Example:
-        >>> trainer = Trainer(
-        ...     model=my_model,
-        ...     train_loader=train_loader,
-        ...     val_loader=val_loader,
-        ...     criterion=nn.CrossEntropyLoss(),
-        ...     optimizer=optimizer,
-        ...     device='cuda',
-        ...     config=config
-        ... )
-        >>> history = trainer.train(epochs=50)
+    Supports both:
+    - Baseline models with flat features (batch_size, num_features)
+    - HybridFormer with dict features {'cnn': ..., 'transformer': ..., 'graph': ...}
     """
 
     def __init__(
         self,
         model: nn.Module,
-        train_loader: DataLoader,
-        val_loader: DataLoader,
-        criterion: nn.Module,
-        optimizer: torch.optim.Optimizer,
-        scheduler: Optional[torch.optim.lr_scheduler._LRScheduler] = None,
+        train_loader,
+        val_loader,
+        optimizer,
+        criterion,
         device: str = 'cuda',
-        config: Optional[Dict[str, Any]] = None
+        config: dict = None,
+        scheduler=None
     ):
         self.model = model
         self.train_loader = train_loader
         self.val_loader = val_loader
-        self.criterion = criterion
         self.optimizer = optimizer
+        self.criterion = criterion
         self.scheduler = scheduler
-        self.device = get_device(prefer_cuda=(device == 'cuda'))
         self.config = config or {}
 
-        # Move model to device
-        self.model.to(self.device)
+        # Device setup
+        self.device = torch.device(device if torch.cuda.is_available() else 'cpu')
+        self.model = self.model.to(self.device)
+        logger.info(f"Using {self.device} device" +
+                   (f": {torch.cuda.get_device_name(0)}" if torch.cuda.is_available() else ""))
 
-        # Initialize metrics calculator
-        self.metrics_calc = MetricsCalculator(
-            num_classes=self.config.get('num_classes', 10)
-        )
-
-        # Setup early stopping
-        patience = self.config.get('early_stopping_patience', 10)
-        self.early_stopping = EarlyStopping(
-            patience=patience,
-            mode='max'  # Maximize validation F1
-        )
-
-        # Setup TensorBoard
-        self.use_tensorboard = self.config.get('use_tensorboard', True)
-        if self.use_tensorboard:
-            log_dir = self.config.get('tensorboard_dir', 'runs/baseline')
-            self.writer = SummaryWriter(log_dir)
-            logger.info(f"TensorBoard logging to {log_dir}")
-
-        # Training history
-        self.history = {
-            'train_loss': [],
-            'val_loss': [],
-            'train_acc': [],
-            'val_acc': [],
-            'val_f1_macro': [],
-            'learning_rates': []
-        }
-
-        # Best model tracking
-        self.best_val_f1 = 0.0
-        self.best_epoch = 0
+        # Logging setup
+        log_dir = self.config.get('logging', {}).get('log_dir', 'runs/baseline')
+        self.writer = SummaryWriter(log_dir)
+        logger.info(f"TensorBoard logging to {log_dir}")
 
         # Save directory
-        self.save_dir = Path(self.config.get('save_dir', 'saved_models'))
+        self.save_dir = Path(self.config.get('logging', {}).get('save_dir', 'saved_models'))
         self.save_dir.mkdir(parents=True, exist_ok=True)
+
+        # Early stopping
+        early_stop_config = self.config.get('training', {}).get('early_stopping', {})
+        if early_stop_config.get('enabled', True):
+            self.early_stopping = EarlyStopping(
+                patience=early_stop_config.get('patience', 10),
+                mode=early_stop_config.get('mode', 'max')
+            )
+        else:
+            self.early_stopping = None
+
+        # Gradient clipping
+        grad_clip_config = self.config.get('training', {}).get('grad_clip', {})
+        self.grad_clip_enabled = grad_clip_config.get('enabled', False)
+        self.grad_clip_max_norm = grad_clip_config.get('max_norm', 1.0)
+
+        # Tracking
+        self.current_epoch = 0
+        self.best_val_metric = float('-inf')
+        self.train_losses = []
+        self.val_losses = []
+        self.val_metrics = []
 
         logger.info("Trainer initialized successfully")
 
-    def train_epoch(self, epoch: int) -> Dict[str, float]:
-        """
-        Train for one epoch.
-
-        Args:
-            epoch: Current epoch number
-
-        Returns:
-            Dictionary containing training metrics
-        """
+    def train_epoch(self, epoch: int) -> dict:
+        """Train for one epoch."""
         self.model.train()
 
-        total_loss = 0.0
-        all_predictions = []
+        running_loss = 0.0
+        all_preds = []
         all_labels = []
 
         # Progress bar
-        pbar = tqdm(
-            self.train_loader,
-            desc=f"Epoch {epoch+1} [Train]",
-            leave=False
-        )
+        pbar = tqdm(self.train_loader, desc=f"Epoch {epoch+1}")
 
         for batch_idx, (features, labels) in enumerate(pbar):
-            # Move to device
-            features = features.to(self.device)
-            labels = labels.to(self.device).squeeze()
+            # Move to device - handle both flat and dict features
+            if isinstance(features, dict):
+                features = {k: v.to(self.device) for k, v in features.items()}
+            else:
+                features = features.to(self.device)
+            labels = labels.to(self.device)
 
             # Zero gradients
             self.optimizer.zero_grad()
 
             # Forward pass
-            logits = self.model(features)
-            loss = self.criterion(logits, labels)
+            outputs = self.model(features)
+            loss = self.criterion(outputs, labels)
 
             # Backward pass
             loss.backward()
 
-            # Gradient clipping (helps with stability)
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+            # Gradient clipping
+            if self.grad_clip_enabled:
+                torch.nn.utils.clip_grad_norm_(
+                    self.model.parameters(),
+                    self.grad_clip_max_norm
+                )
 
             # Optimizer step
             self.optimizer.step()
 
             # Track metrics
-            total_loss += loss.item()
-            predictions = torch.argmax(logits, dim=1)
-            all_predictions.extend(predictions.cpu().numpy())
-            all_labels.extend(labels.cpu().numpy())
+            running_loss += loss.item()
+            predictions = torch.argmax(outputs, dim=1)
+            all_preds.append(predictions.cpu())
+            all_labels.append(labels.cpu())
 
             # Update progress bar
-            pbar.set_postfix({'loss': f'{loss.item():.4f}'})
+            pbar.set_postfix({'loss': loss.item()})
 
-            # Log batch metrics to TensorBoard
-            if self.use_tensorboard and batch_idx % 100 == 0:
+            # Log to tensorboard
+            log_interval = self.config.get('logging', {}).get('log_interval', 100)
+            if batch_idx % log_interval == 0:
                 global_step = epoch * len(self.train_loader) + batch_idx
-                self.writer.add_scalar('Batch/train_loss', loss.item(), global_step)
+                self.writer.add_scalar('Train/Loss', loss.item(), global_step)
 
         # Compute epoch metrics
-        avg_loss = total_loss / len(self.train_loader)
-        metrics = self.metrics_calc.compute_metrics(all_labels, all_predictions)
+        epoch_loss = running_loss / len(self.train_loader)
+        all_preds = torch.cat(all_preds)
+        all_labels = torch.cat(all_labels)
+        metrics = compute_metrics(all_preds, all_labels)
 
         return {
-            'loss': avg_loss,
+            'loss': epoch_loss,
             'accuracy': metrics['accuracy'],
-            'f1_macro': metrics['f1_macro']
+            'macro_f1': metrics['macro_f1'],
+            'weighted_f1': metrics['weighted_f1']
         }
 
-    def validate(self, epoch: int) -> Dict[str, float]:
-        """
-        Validate the model.
-
-        Args:
-            epoch: Current epoch number
-
-        Returns:
-            Dictionary containing validation metrics
-        """
+    def validate(self) -> dict:
+        """Validate on validation set."""
         self.model.eval()
 
-        total_loss = 0.0
-        all_predictions = []
+        running_loss = 0.0
+        all_preds = []
         all_labels = []
 
-        pbar = tqdm(
-            self.val_loader,
-            desc=f"Epoch {epoch+1} [Val]  ",
-            leave=False
-        )
-
         with torch.no_grad():
-            for features, labels in pbar:
-                # Move to device
-                features = features.to(self.device)
-                labels = labels.to(self.device).squeeze()
+            for features, labels in tqdm(self.val_loader, desc="Validating"):
+                # Move to device - handle both flat and dict features
+                if isinstance(features, dict):
+                    features = {k: v.to(self.device) for k, v in features.items()}
+                else:
+                    features = features.to(self.device)
+                labels = labels.to(self.device)
 
                 # Forward pass
-                logits = self.model(features)
-                loss = self.criterion(logits, labels)
+                outputs = self.model(features)
+                loss = self.criterion(outputs, labels)
 
                 # Track metrics
-                total_loss += loss.item()
-                predictions = torch.argmax(logits, dim=1)
-                all_predictions.extend(predictions.cpu().numpy())
-                all_labels.extend(labels.cpu().numpy())
+                running_loss += loss.item()
+                predictions = torch.argmax(outputs, dim=1)
+                all_preds.append(predictions.cpu())
+                all_labels.append(labels.cpu())
 
-                # Update progress bar
-                pbar.set_postfix({'loss': f'{loss.item():.4f}'})
-
-        # Compute epoch metrics
-        avg_loss = total_loss / len(self.val_loader)
-        metrics = self.metrics_calc.compute_metrics(all_labels, all_predictions)
+        # Compute validation metrics
+        val_loss = running_loss / len(self.val_loader)
+        all_preds = torch.cat(all_preds)
+        all_labels = torch.cat(all_labels)
+        metrics = compute_metrics(all_preds, all_labels)
 
         return {
-            'loss': avg_loss,
+            'loss': val_loss,
             'accuracy': metrics['accuracy'],
-            'f1_macro': metrics['f1_macro'],
-            'all_metrics': metrics
+            'macro_f1': metrics['macro_f1'],
+            'weighted_f1': metrics['weighted_f1'],
+            'per_class_f1': metrics['per_class_f1'],
+            'confusion_matrix': metrics['confusion_matrix']
         }
 
-    def train(self, epochs: int) -> Dict[str, list]:
-        """
-        Main training loop.
-
-        Args:
-            epochs: Number of epochs to train
-
-        Returns:
-            Training history dictionary
-        """
+    def train(self, epochs: int):
+        """Main training loop."""
         logger.info(f"Starting training for {epochs} epochs")
         logger.info(f"Device: {self.device}")
         logger.info(f"Train batches: {len(self.train_loader)}")
         logger.info(f"Val batches: {len(self.val_loader)}")
 
         for epoch in range(epochs):
+            self.current_epoch = epoch
+            epoch_start_time = time.time()
+
             # Train
             train_metrics = self.train_epoch(epoch)
 
             # Validate
-            val_metrics = self.validate(epoch)
+            val_metrics = self.validate()
 
-            # Update learning rate
+            # Learning rate step
             if self.scheduler is not None:
-                if isinstance(self.scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
-                    self.scheduler.step(val_metrics['loss'])
-                else:
-                    self.scheduler.step()
+                self.scheduler.step()
+                current_lr = self.optimizer.param_groups[0]['lr']
+                self.writer.add_scalar('Train/LearningRate', current_lr, epoch)
 
-            # Get current learning rate
-            current_lr = self.optimizer.param_groups[0]['lr']
+            # Epoch time
+            epoch_time = time.time() - epoch_start_time
 
-            # Update history
-            self.history['train_loss'].append(train_metrics['loss'])
-            self.history['val_loss'].append(val_metrics['loss'])
-            self.history['train_acc'].append(train_metrics['accuracy'])
-            self.history['val_acc'].append(val_metrics['accuracy'])
-            self.history['val_f1_macro'].append(val_metrics['f1_macro'])
-            self.history['learning_rates'].append(current_lr)
-
-            # Log to TensorBoard
-            if self.use_tensorboard:
-                self.writer.add_scalar('Epoch/train_loss', train_metrics['loss'], epoch)
-                self.writer.add_scalar('Epoch/val_loss', val_metrics['loss'], epoch)
-                self.writer.add_scalar('Epoch/train_acc', train_metrics['accuracy'], epoch)
-                self.writer.add_scalar('Epoch/val_acc', val_metrics['accuracy'], epoch)
-                self.writer.add_scalar('Epoch/val_f1_macro', val_metrics['f1_macro'], epoch)
-                self.writer.add_scalar('Epoch/learning_rate', current_lr, epoch)
+            # Log metrics
+            self.writer.add_scalar('Train/Accuracy', train_metrics['accuracy'], epoch)
+            self.writer.add_scalar('Train/MacroF1', train_metrics['macro_f1'], epoch)
+            self.writer.add_scalar('Val/Loss', val_metrics['loss'], epoch)
+            self.writer.add_scalar('Val/Accuracy', val_metrics['accuracy'], epoch)
+            self.writer.add_scalar('Val/MacroF1', val_metrics['macro_f1'], epoch)
 
             # Print epoch summary
-            print(f"\nEpoch {epoch+1}/{epochs}")
-            print(f"  Train - Loss: {train_metrics['loss']:.4f}, Acc: {train_metrics['accuracy']:.4f}")
-            print(f"  Val   - Loss: {val_metrics['loss']:.4f}, Acc: {val_metrics['accuracy']:.4f}, F1: {val_metrics['f1_macro']:.4f}")
-            print(f"  LR: {current_lr:.6f}")
+            logger.info(
+                f"Epoch {epoch+1}/{epochs} | "
+                f"Time: {epoch_time:.1f}s | "
+                f"Train Loss: {train_metrics['loss']:.4f} | "
+                f"Val Loss: {val_metrics['loss']:.4f} | "
+                f"Val Acc: {val_metrics['accuracy']*100:.2f}% | "
+                f"Val Macro F1: {val_metrics['macro_f1']*100:.2f}%"
+            )
 
-            # Save best model
-            if val_metrics['f1_macro'] > self.best_val_f1:
-                self.best_val_f1 = val_metrics['f1_macro']
-                self.best_epoch = epoch
+            # Print per-class F1 scores
+            class_names = self.config.get('evaluation', {}).get('class_names', {})
+            if class_names:
+                logger.info("Per-class F1 scores:")
+                for class_idx, f1_score in enumerate(val_metrics['per_class_f1']):
+                    class_name = class_names.get(class_idx, f"Class {class_idx}")
+                    logger.info(f"  {class_name}: {f1_score*100:.2f}%")
 
-                self._save_best_model(epoch, val_metrics)
-                print(f"  ✓ New best model! F1: {self.best_val_f1:.4f}")
+            # Save checkpoint
+            metric_for_best = val_metrics.get('macro_f1', val_metrics['accuracy'])
 
-            # Early stopping check
-            if self.early_stopping(val_metrics['f1_macro']):
-                print(f"\nEarly stopping triggered at epoch {epoch+1}")
-                print(f"Best F1: {self.best_val_f1:.4f} at epoch {self.best_epoch+1}")
-                break
+            if metric_for_best > self.best_val_metric:
+                self.best_val_metric = metric_for_best
+                logger.info(f"New best model! Macro F1: {metric_for_best*100:.2f}%")
 
-        # Training complete
-        logger.info("Training complete!")
-        logger.info(f"Best validation F1: {self.best_val_f1:.4f} at epoch {self.best_epoch+1}")
+                save_checkpoint(
+                    model=self.model,
+                    optimizer=self.optimizer,
+                    epoch=epoch,
+                    metrics=val_metrics,
+                    path=self.save_dir / 'best_model.pth'
+                )
 
-        # Close TensorBoard writer
-        if self.use_tensorboard:
-            self.writer.close()
+            # Save last model
+            save_checkpoint(
+                model=self.model,
+                optimizer=self.optimizer,
+                epoch=epoch,
+                metrics=val_metrics,
+                path=self.save_dir / 'last_model.pth'
+            )
 
-        return self.history
+            # Early stopping
+            if self.early_stopping is not None:
+                self.early_stopping(metric_for_best)
+                if self.early_stopping.early_stop:
+                    logger.info(f"Early stopping triggered at epoch {epoch+1}")
+                    break
 
-    def _save_best_model(self, epoch: int, metrics: Dict[str, float]):
-        """Save the best model checkpoint."""
-        save_path = self.save_dir / 'baseline_best.pth'
+        logger.info("Training completed!")
+        logger.info(f"Best validation macro F1: {self.best_val_metric*100:.2f}%")
 
-        save_checkpoint(
-            model=self.model,
-            optimizer=self.optimizer,
-            epoch=epoch,
-            metrics=metrics,
-            path=save_path,
-            scheduler=self.scheduler,
-            extra_state={'best_val_f1': self.best_val_f1}
-        )
-
-    def save_final_model(self):
-        """Save final model state."""
-        save_path = self.save_dir / 'baseline_final.pth'
-
-        save_checkpoint(
-            model=self.model,
-            optimizer=self.optimizer,
-            epoch=len(self.history['train_loss']),
-            metrics={'val_f1_macro': self.history['val_f1_macro'][-1]},
-            path=save_path,
-            scheduler=self.scheduler
-        )
-
-        logger.info(f"Final model saved to {save_path}")
+        self.writer.close()

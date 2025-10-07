@@ -68,3 +68,5 @@ htmlcov/
 # Environment variables
 .env
 .env.local
+
+!data/processed/branch_feature_allocation.json

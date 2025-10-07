@@ -1,300 +1,203 @@
 """
-Evaluation metrics for NIDS project.
-
-This module provides comprehensive metrics calculation including
-accuracy, precision, recall, F1-score, and confusion matrix.
+Metrics computation for NIDS models.
 """
 
-import numpy as np
 import torch
+import numpy as np
 from sklearn.metrics import (
     accuracy_score,
-    precision_recall_fscore_support,
+    f1_score,
+    precision_score,
+    recall_score,
     confusion_matrix,
     classification_report
 )
-from typing import Dict, Optional
-import logging
-
-logger = logging.getLogger(__name__)
+from typing import Dict, Union
 
 
-class MetricsCalculator:
+def compute_metrics(predictions: Union[torch.Tensor, np.ndarray],
+                   labels: Union[torch.Tensor, np.ndarray]) -> Dict:
     """
-    Calculate comprehensive evaluation metrics for classification.
-
-    Computes per-class and macro-averaged metrics including:
-    - Accuracy
-    - Precision, Recall, F1-score (per class and macro)
-    - Confusion matrix
+    Compute comprehensive classification metrics.
 
     Args:
-        num_classes: Number of classes
-        class_names: Optional dictionary mapping class_id -> class_name
-
-    Example:
-        >>> calc = MetricsCalculator(num_classes=10)
-        >>> metrics = calc.compute_metrics(y_true, y_pred)
-        >>> print(metrics['accuracy'])
-        0.856
-    """
-
-    def __init__(
-        self,
-        num_classes: int = 10,
-        class_names: Optional[Dict[int, str]] = None
-    ):
-        self.num_classes = num_classes
-
-        # Default class names if not provided
-        if class_names is None:
-            self.class_names = {
-                0: "Benign",
-                1: "Analysis",
-                2: "Backdoor",
-                3: "DoS",
-                4: "Exploits",
-                5: "Fuzzers",
-                6: "Generic",
-                7: "Reconnaissance",
-                8: "Shellcode",
-                9: "Worms"
-            }
-        else:
-            self.class_names = class_names
-
-    def compute_metrics(
-        self,
-        y_true: np.ndarray,
-        y_pred: np.ndarray,
-        average: str = 'macro'
-    ) -> Dict[str, float]:
-        """
-        Compute all metrics.
-
-        Args:
-            y_true: True labels (shape: [N,])
-            y_pred: Predicted labels (shape: [N,])
-            average: Averaging method ('macro', 'weighted', 'micro')
-
-        Returns:
-            Dictionary containing all metrics
-        """
-        # Ensure numpy arrays
-        y_true = self._to_numpy(y_true)
-        y_pred = self._to_numpy(y_pred)
-
-        # Flatten if needed (remove extra dimensions)
-        y_true = y_true.flatten()
-        y_pred = y_pred.flatten()
-
-        # Overall accuracy
-        accuracy = accuracy_score(y_true, y_pred)
-
-        # Precision, recall, F1 (macro-averaged)
-        precision, recall, f1, support = precision_recall_fscore_support(
-            y_true,
-            y_pred,
-            average=average,
-            zero_division=0
-        )
-
-        # Per-class metrics
-        precision_per_class, recall_per_class, f1_per_class, support_per_class = \
-            precision_recall_fscore_support(
-                y_true,
-                y_pred,
-                average=None,
-                zero_division=0,
-                labels=list(range(self.num_classes))
-            )
-
-        metrics = {
-            'accuracy': float(accuracy),
-            f'precision_{average}': float(precision),
-            f'recall_{average}': float(recall),
-            f'f1_{average}': float(f1),
-        }
-
-        # Add per-class metrics
-        for i in range(self.num_classes):
-            class_name = self.class_names.get(i, f"Class_{i}")
-            metrics[f'precision_{class_name}'] = float(precision_per_class[i])
-            metrics[f'recall_{class_name}'] = float(recall_per_class[i])
-            metrics[f'f1_{class_name}'] = float(f1_per_class[i])
-            metrics[f'support_{class_name}'] = int(support_per_class[i])
-
-        return metrics
-
-    def get_confusion_matrix(
-        self,
-        y_true: np.ndarray,
-        y_pred: np.ndarray,
-        normalize: Optional[str] = None
-    ) -> np.ndarray:
-        """
-        Compute confusion matrix.
-
-        Args:
-            y_true: True labels
-            y_pred: Predicted labels
-            normalize: Normalization mode ('true', 'pred', 'all', or None)
-
-        Returns:
-            Confusion matrix (shape: [num_classes, num_classes])
-        """
-        y_true = self._to_numpy(y_true).flatten()
-        y_pred = self._to_numpy(y_pred).flatten()
-
-        cm = confusion_matrix(
-            y_true,
-            y_pred,
-            labels=list(range(self.num_classes)),
-            normalize=normalize
-        )
-
-        return cm
-
-    def get_classification_report(
-        self,
-        y_true: np.ndarray,
-        y_pred: np.ndarray
-    ) -> str:
-        """
-        Get detailed classification report as string.
-
-        Args:
-            y_true: True labels
-            y_pred: Predicted labels
-
-        Returns:
-            Formatted classification report
-        """
-        y_true = self._to_numpy(y_true).flatten()
-        y_pred = self._to_numpy(y_pred).flatten()
-
-        report = classification_report(
-            y_true,
-            y_pred,
-            labels=list(range(self.num_classes)),
-            target_names=[self.class_names[i] for i in range(self.num_classes)],
-            zero_division=0
-        )
-
-        return report
-
-    def compute_per_class_metrics(
-        self,
-        y_true: np.ndarray,
-        y_pred: np.ndarray
-    ) -> Dict[str, Dict[str, float]]:
-        """
-        Get detailed per-class metrics.
-
-        Args:
-            y_true: True labels
-            y_pred: Predicted labels
-
-        Returns:
-            Dictionary mapping class_name -> {precision, recall, f1, support}
-        """
-        y_true = self._to_numpy(y_true).flatten()
-        y_pred = self._to_numpy(y_pred).flatten()
-
-        precision, recall, f1, support = precision_recall_fscore_support(
-            y_true,
-            y_pred,
-            average=None,
-            zero_division=0,
-            labels=list(range(self.num_classes))
-        )
-
-        per_class = {}
-        for i in range(self.num_classes):
-            class_name = self.class_names[i]
-            per_class[class_name] = {
-                'precision': float(precision[i]),
-                'recall': float(recall[i]),
-                'f1': float(f1[i]),
-                'support': int(support[i])
-            }
-
-        return per_class
-
-    def _to_numpy(self, tensor_or_array) -> np.ndarray:
-        """Convert PyTorch tensor or numpy array to numpy array."""
-        if isinstance(tensor_or_array, torch.Tensor):
-            return tensor_or_array.cpu().detach().numpy()
-        elif isinstance(tensor_or_array, np.ndarray):
-            return tensor_or_array
-        else:
-            return np.array(tensor_or_array)
-
-    def print_metrics_summary(self, metrics: Dict[str, float]):
-        """
-        Pretty print metrics summary.
-
-        Args:
-            metrics: Dictionary of computed metrics
-        """
-        print("\n" + "="*60)
-        print("METRICS SUMMARY")
-        print("="*60)
-
-        # Overall metrics
-        print(f"\nOverall Metrics:")
-        print(f"  Accuracy:           {metrics['accuracy']:.4f}")
-
-        for avg_type in ['macro', 'weighted', 'micro']:
-            if f'precision_{avg_type}' in metrics:
-                print(f"\n{avg_type.capitalize()}-averaged:")
-                print(f"  Precision:          {metrics[f'precision_{avg_type}']:.4f}")
-                print(f"  Recall:             {metrics[f'recall_{avg_type}']:.4f}")
-                print(f"  F1-score:           {metrics[f'f1_{avg_type}']:.4f}")
-
-        # Per-class metrics
-        print(f"\nPer-class F1-scores:")
-        for i in range(self.num_classes):
-            class_name = self.class_names[i]
-            f1_key = f'f1_{class_name}'
-            support_key = f'support_{class_name}'
-            if f1_key in metrics:
-                f1 = metrics[f1_key]
-                support = metrics.get(support_key, 0)
-                print(f"  {class_name:15s}: {f1:.4f} (support: {support:>6})")
-
-        print("="*60 + "\n")
-
-
-def compute_metrics_from_logits(
-    logits: torch.Tensor,
-    labels: torch.Tensor,
-    metrics_calc: Optional[MetricsCalculator] = None
-) -> Dict[str, float]:
-    """
-    Compute metrics from model logits.
-
-    Args:
-        logits: Model output logits (shape: [N, num_classes])
-        labels: True labels (shape: [N,] or [N, 1])
-        metrics_calc: MetricsCalculator instance (creates default if None)
+        predictions: Predicted labels (torch.Tensor or np.ndarray)
+        labels: True labels (torch.Tensor or np.ndarray)
 
     Returns:
-        Dictionary of computed metrics
+        Dictionary containing:
+            - accuracy: Overall accuracy
+            - macro_f1: Macro-averaged F1 score (treats all classes equally)
+            - weighted_f1: Weighted F1 score (weighted by class frequency)
+            - per_class_f1: F1 score for each class
+            - macro_precision: Macro-averaged precision
+            - macro_recall: Macro-averaged recall
+            - confusion_matrix: Confusion matrix
     """
-    # Get predictions from logits
-    predictions = torch.argmax(logits, dim=1)
-
-    # Flatten labels if needed
-    if len(labels.shape) > 1:
-        labels = labels.squeeze()
-
-    # Convert to numpy
-    y_pred = predictions.cpu().detach().numpy()
-    y_true = labels.cpu().detach().numpy()
+    # Convert to numpy if needed
+    if isinstance(predictions, torch.Tensor):
+        predictions = predictions.cpu().numpy()
+    if isinstance(labels, torch.Tensor):
+        labels = labels.cpu().numpy()
 
     # Compute metrics
-    if metrics_calc is None:
-        metrics_calc = MetricsCalculator()
+    accuracy = accuracy_score(labels, predictions)
+    macro_f1 = f1_score(labels, predictions, average='macro', zero_division=0)
+    weighted_f1 = f1_score(labels, predictions, average='weighted', zero_division=0)
+    per_class_f1 = f1_score(labels, predictions, average=None, zero_division=0)
 
-    return metrics_calc.compute_metrics(y_true, y_pred)
+    macro_precision = precision_score(labels, predictions, average='macro', zero_division=0)
+    macro_recall = recall_score(labels, predictions, average='macro', zero_division=0)
+
+    conf_matrix = confusion_matrix(labels, predictions)
+
+    return {
+        'accuracy': float(accuracy),
+        'macro_f1': float(macro_f1),
+        'weighted_f1': float(weighted_f1),
+        'per_class_f1': per_class_f1,
+        'macro_precision': float(macro_precision),
+        'macro_recall': float(macro_recall),
+        'confusion_matrix': conf_matrix
+    }
+
+
+def compute_per_class_metrics(predictions: Union[torch.Tensor, np.ndarray],
+                              labels: Union[torch.Tensor, np.ndarray],
+                              num_classes: int = 10) -> Dict:
+    """
+    Compute detailed per-class metrics.
+
+    Args:
+        predictions: Predicted labels
+        labels: True labels
+        num_classes: Number of classes
+
+    Returns:
+        Dictionary with per-class precision, recall, and F1
+    """
+    # Convert to numpy if needed
+    if isinstance(predictions, torch.Tensor):
+        predictions = predictions.cpu().numpy()
+    if isinstance(labels, torch.Tensor):
+        labels = labels.cpu().numpy()
+
+    # Compute per-class metrics
+    precision = precision_score(labels, predictions, average=None, zero_division=0)
+    recall = recall_score(labels, predictions, average=None, zero_division=0)
+    f1 = f1_score(labels, predictions, average=None, zero_division=0)
+
+    # Count samples per class
+    unique, counts = np.unique(labels, return_counts=True)
+    class_counts = {int(cls): int(count) for cls, count in zip(unique, counts)}
+
+    return {
+        'precision': precision,
+        'recall': recall,
+        'f1': f1,
+        'class_counts': class_counts
+    }
+
+
+def print_classification_report(predictions: Union[torch.Tensor, np.ndarray],
+                                labels: Union[torch.Tensor, np.ndarray],
+                                class_names: Dict[int, str] = None):
+    """
+    Print detailed classification report.
+
+    Args:
+        predictions: Predicted labels
+        labels: True labels
+        class_names: Optional mapping of class indices to names
+    """
+    # Convert to numpy if needed
+    if isinstance(predictions, torch.Tensor):
+        predictions = predictions.cpu().numpy()
+    if isinstance(labels, torch.Tensor):
+        labels = labels.cpu().numpy()
+
+    # Get class names
+    if class_names is None:
+        class_names = {i: f"Class {i}" for i in range(10)}
+
+    target_names = [class_names[i] for i in sorted(class_names.keys())]
+
+    # Print report
+    print("\nClassification Report:")
+    print("=" * 70)
+    print(classification_report(
+        labels,
+        predictions,
+        target_names=target_names,
+        zero_division=0
+    ))
+
+
+def print_confusion_matrix(conf_matrix: np.ndarray,
+                          class_names: Dict[int, str] = None):
+    """
+    Print formatted confusion matrix.
+
+    Args:
+        conf_matrix: Confusion matrix
+        class_names: Optional mapping of class indices to names
+    """
+    if class_names is None:
+        class_names = {i: f"Class {i}" for i in range(conf_matrix.shape[0])}
+
+    print("\nConfusion Matrix:")
+    print("=" * 70)
+
+    # Header
+    print(f"{'True/Pred':<15}", end="")
+    for i in range(conf_matrix.shape[1]):
+        print(f"{class_names[i]:<12}", end="")
+    print()
+    print("-" * 70)
+
+    # Rows
+    for i in range(conf_matrix.shape[0]):
+        print(f"{class_names[i]:<15}", end="")
+        for j in range(conf_matrix.shape[1]):
+            print(f"{conf_matrix[i, j]:<12}", end="")
+        print()
+    print("=" * 70)
+
+
+class MetricsTracker:
+    """Track metrics across epochs."""
+
+    def __init__(self):
+        self.history = {
+            'train_loss': [],
+            'val_loss': [],
+            'train_acc': [],
+            'val_acc': [],
+            'train_macro_f1': [],
+            'val_macro_f1': [],
+        }
+
+    def update(self, train_metrics: Dict, val_metrics: Dict):
+        """Update history with new metrics."""
+        self.history['train_loss'].append(train_metrics.get('loss', 0))
+        self.history['val_loss'].append(val_metrics.get('loss', 0))
+        self.history['train_acc'].append(train_metrics.get('accuracy', 0))
+        self.history['val_acc'].append(val_metrics.get('accuracy', 0))
+        self.history['train_macro_f1'].append(train_metrics.get('macro_f1', 0))
+        self.history['val_macro_f1'].append(val_metrics.get('macro_f1', 0))
+
+    def get_best_epoch(self, metric: str = 'val_macro_f1') -> int:
+        """Get epoch with best metric value."""
+        if metric not in self.history:
+            raise ValueError(f"Unknown metric: {metric}")
+
+        values = self.history[metric]
+        return int(np.argmax(values))
+
+    def get_best_value(self, metric: str = 'val_macro_f1') -> float:
+        """Get best value for a metric."""
+        if metric not in self.history:
+            raise ValueError(f"Unknown metric: {metric}")
+
+        values = self.history[metric]
+        return float(np.max(values))
