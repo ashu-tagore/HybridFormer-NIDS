@@ -1,0 +1,107 @@
+# HybridFormer Enhanced - Focal Loss + Prototypical + Balanced Sampling
+# Target: 75-82% macro F1
+
+# Model Configuration
+model:
+  name: "prototypical_hybridformer"
+  num_classes: 10
+  dropout: 0.3
+  embedding_dim: 128
+  use_dual_head: true
+
+# Data Configuration
+data:
+  data_dir: "data/processed"
+  branch_allocation: "data/processed/branch_feature_allocation.json"
+  batch_size: 64
+  num_workers: 4
+  mode: "branch"
+
+  # Class-balanced sampling (NEW!)
+  use_balanced_sampler: true
+  sampler_mode: "sqrt"  # sqrt balancing (moderate)
+
+# Training Configuration
+training:
+  epochs: 100
+  device: "cuda"
+  seed: 42
+
+  # CRITICAL: Enable prototypical learning
+  use_prototypical: true
+
+  # Optimizer
+  optimizer:
+    type: "adamw"
+    lr: 0.0003
+    weight_decay: 0.0001
+    betas: [0.9, 0.999]
+
+  # Learning Rate Scheduler
+  scheduler:
+    type: "cosine"
+    warmup_epochs: 5
+    min_lr: 0.000001
+
+  # Loss Function - Prototypical Focal Loss
+  loss:
+    type: "prototypical_focal"  # Use combined loss
+    focal_alpha: 1.0
+    focal_gamma: 2.0
+    proto_weight: 0.3  # Weight for prototypical loss
+    separation_weight: 0.1  # Weight for prototype separation
+    temperature: 0.1  # Temperature for prototypical distance
+
+  # Early Stopping
+  early_stopping:
+    enabled: true
+    patience: 15
+    metric: "val_macro_f1"
+    mode: "max"
+
+  # Gradient Clipping
+  grad_clip:
+    enabled: true
+    max_norm: 1.0
+
+# Logging Configuration
+logging:
+  log_dir: "logs/hybridformer_enhanced"
+  save_dir: "saved_models/hybridformer_enhanced"
+  tensorboard: true
+  log_interval: 100
+  save_best: true
+  save_last: true
+  save_interval: null
+
+# Evaluation Configuration
+evaluation:
+  metrics:
+    - "accuracy"
+    - "macro_f1"
+    - "weighted_f1"
+    - "per_class_f1"
+    - "confusion_matrix"
+
+  class_names:
+    0: "Benign"
+    1: "Analysis"
+    2: "Backdoor"
+    3: "DoS"
+    4: "Exploits"
+    5: "Fuzzers"
+    6: "Generic"
+    7: "Reconnaissance"
+    8: "Shellcode"
+    9: "Worms"
+
+# Experiment Tracking
+experiment:
+  name: "hybridformer_enhanced"
+  description: "Focal loss + Prototypical learning + Balanced sampling"
+  tags:
+    - "week5"
+    - "enhanced"
+    - "focal_loss"
+    - "prototypical"
+    - "balanced_sampling"

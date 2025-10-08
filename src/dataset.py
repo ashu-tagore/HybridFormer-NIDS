@@ -164,7 +164,9 @@ def create_dataloaders(
     batch_size: int = 64,
     num_workers: int = 4,
     mode: str = 'flat',
-    branch_allocation_path: Optional[Union[str, Path]] = None
+    branch_allocation_path: Optional[Union[str, Path]] = None,
+    use_balanced_sampler: bool = False,
+    sampler_mode: str = 'sqrt'
 ) -> Tuple[DataLoader, DataLoader, DataLoader]:
     """
     Create train, validation, and test dataloaders.
@@ -204,12 +206,23 @@ def create_dataloaders(
     )
 
     # Create dataloaders
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=num_workers,
-        pin_memory=True  # Faster GPU transfer
+    # Create balanced sampler if requested
+    if use_balanced_sampler:
+        sampler = create_balanced_sampler(train_dataset.labels, mode=sampler_mode)
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=batch_size,
+            sampler=sampler,  # Use sampler instead of shuffle
+            num_workers=num_workers,
+            pin_memory=True
+    )
+    else:
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=batch_size,
+            shuffle=True,
+            num_workers=num_workers,
+            pin_memory=True
     )
 
     val_loader = DataLoader(
@@ -439,6 +452,66 @@ def test_class_weights():
 
     print("\n✓ Class weights computed successfully")
     return True
+
+def create_balanced_sampler(labels: torch.Tensor, mode: str = 'sqrt'):
+    """
+    Create a weighted sampler for class-balanced training.
+
+    Args:
+        labels: Training labels tensor
+        mode: Weighting strategy
+            - 'inverse': weight = 1 / class_frequency (extreme balancing)
+            - 'sqrt': weight = 1 / sqrt(class_frequency) (moderate balancing)
+            - 'cbrt': weight = 1 / cbrt(class_frequency) (mild balancing)
+
+    Returns:
+        WeightedRandomSampler
+    """
+    from torch.utils.data import WeightedRandomSampler
+    import numpy as np
+
+    # Get class distribution
+    unique, counts = torch.unique(labels, return_counts=True)
+    class_counts = {int(cls): int(count) for cls, count in zip(unique, counts)}
+
+    # Compute sample weights based on class frequency
+    sample_weights = torch.zeros(len(labels))
+
+    for cls, count in class_counts.items():
+        # Find samples of this class
+        mask = (labels == cls)
+
+        if mode == 'inverse':
+            # Inverse frequency: rare classes get VERY high weight
+            weight = len(labels) / (len(class_counts) * count)
+        elif mode == 'sqrt':
+            # Square root: moderate balancing (recommended)
+            weight = np.sqrt(len(labels) / count)
+        elif mode == 'cbrt':
+            # Cube root: mild balancing
+            weight = np.cbrt(len(labels) / count)
+        else:
+            raise ValueError(f"Unknown mode: {mode}")
+
+        sample_weights[mask] = weight
+
+    # Create sampler
+    sampler = WeightedRandomSampler(
+        weights=sample_weights,
+        num_samples=len(labels),
+        replacement=True  # With replacement for oversampling
+    )
+
+    print(f"\nClass-balanced sampler created (mode={mode}):")
+    print(f"  Sample weights range: [{sample_weights.min():.2f}, {sample_weights.max():.2f}]")
+    print(f"  Samples per epoch: {len(labels):,}")
+    print(f"\nExpected samples per class per epoch:")
+    for cls in sorted(class_counts.keys()):
+        original_count = class_counts[cls]
+        expected_samples = int(sample_weights[labels == cls][0] * len(labels) / sample_weights.sum())
+        print(f"  Class {cls}: {original_count:,} → ~{expected_samples:,} (×{expected_samples/original_count:.1f})")
+
+    return sampler
 
 
 if __name__ == '__main__':

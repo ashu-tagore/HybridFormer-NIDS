@@ -26,6 +26,8 @@ data/processed/
 
 # Model checkpoints (too large)
 saved_models/
+logs/
+runs/
 *.pth
 *.pt
 

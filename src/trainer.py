@@ -1,6 +1,7 @@
 """
 Trainer class for NIDS models.
 Handles both baseline (flat features) and HybridFormer (dict features).
+Enhanced with prototypical learning and detailed loss component logging.
 """
 
 import torch
@@ -26,6 +27,7 @@ class Trainer:
     Supports both:
     - Baseline models with flat features (batch_size, num_features)
     - HybridFormer with dict features {'cnn': ..., 'transformer': ..., 'graph': ...}
+    - Prototypical learning with detailed loss component tracking
     """
 
     def __init__(
@@ -50,13 +52,13 @@ class Trainer:
         # Device setup
         self.device = torch.device(device if torch.cuda.is_available() else 'cpu')
         self.model = self.model.to(self.device)
-        logger.info(f"Using {self.device} device" +
-                   (f": {torch.cuda.get_device_name(0)}" if torch.cuda.is_available() else ""))
+        device_info = ": %s" % torch.cuda.get_device_name(0) if torch.cuda.is_available() else ""
+        logger.info("Using %s device%s", self.device, device_info)
 
         # Logging setup
         log_dir = self.config.get('logging', {}).get('log_dir', 'runs/baseline')
         self.writer = SummaryWriter(log_dir)
-        logger.info(f"TensorBoard logging to {log_dir}")
+        logger.info("TensorBoard logging to %s", log_dir)
 
         # Save directory
         self.save_dir = Path(self.config.get('logging', {}).get('save_dir', 'saved_models'))
@@ -94,8 +96,20 @@ class Trainer:
         all_preds = []
         all_labels = []
 
+        # Check if using prototypical model
+        use_prototypical = self.config.get('training', {}).get('use_prototypical', False)
+
+        # Track loss components for prototypical learning
+        if use_prototypical:
+            running_loss_components = {
+                'ce_loss': 0.0,
+                'proto_loss': 0.0,
+                'separation_loss': 0.0
+            }
+
         # Progress bar
         pbar = tqdm(self.train_loader, desc=f"Epoch {epoch+1}")
+        log_interval = self.config.get('logging', {}).get('log_interval', 100)
 
         for batch_idx, (features, labels) in enumerate(pbar):
             # Move to device - handle both flat and dict features
@@ -108,9 +122,23 @@ class Trainer:
             # Zero gradients
             self.optimizer.zero_grad()
 
-            # Forward pass
-            outputs = self.model(features)
-            loss = self.criterion(outputs, labels)
+            # Forward pass - handle prototypical model
+            if use_prototypical:
+                # Get outputs from model (embeddings returned but unused by loss)
+                outputs, proto_logits, _ = self.model(features, return_embeddings=True)
+                prototypes = self.model.get_prototypes()
+
+                # Prototypical loss returns (loss, loss_dict)
+                loss, loss_dict = self.criterion(outputs, proto_logits, prototypes, labels)
+
+                # Track loss components
+                for key in running_loss_components.keys():
+                    if key in loss_dict:
+                        running_loss_components[key] += loss_dict[key].item()
+            else:
+                # Standard model
+                outputs = self.model(features)
+                loss = self.criterion(outputs, labels)
 
             # Backward pass
             loss.backward()
@@ -132,13 +160,22 @@ class Trainer:
             all_labels.append(labels.cpu())
 
             # Update progress bar
-            pbar.set_postfix({'loss': loss.item()})
+            pbar.set_postfix({'loss': '%.4f' % loss.item()})
 
             # Log to tensorboard
-            log_interval = self.config.get('logging', {}).get('log_interval', 100)
             if batch_idx % log_interval == 0:
                 global_step = epoch * len(self.train_loader) + batch_idx
                 self.writer.add_scalar('Train/Loss', loss.item(), global_step)
+
+                # Log loss components for prototypical learning
+                if use_prototypical and 'loss_dict' in locals():
+                    for loss_name, loss_value in loss_dict.items():
+                        if loss_name != 'total_loss':  # Avoid duplicate logging
+                            self.writer.add_scalar(
+                                f'Train/Loss_{loss_name}',
+                                loss_value.item(),
+                                global_step
+                            )
 
         # Compute epoch metrics
         epoch_loss = running_loss / len(self.train_loader)
@@ -146,12 +183,19 @@ class Trainer:
         all_labels = torch.cat(all_labels)
         metrics = compute_metrics(all_preds, all_labels)
 
-        return {
+        result = {
             'loss': epoch_loss,
             'accuracy': metrics['accuracy'],
             'macro_f1': metrics['macro_f1'],
             'weighted_f1': metrics['weighted_f1']
         }
+
+        # Add loss components to result for prototypical learning
+        if use_prototypical:
+            for key, value in running_loss_components.items():
+                result[f'avg_{key}'] = value / len(self.train_loader)
+
+        return result
 
     def validate(self) -> dict:
         """Validate on validation set."""
@@ -160,6 +204,17 @@ class Trainer:
         running_loss = 0.0
         all_preds = []
         all_labels = []
+
+        # Check if using prototypical model
+        use_prototypical = self.config.get('training', {}).get('use_prototypical', False)
+
+        # Track loss components for prototypical learning
+        if use_prototypical:
+            running_loss_components = {
+                'ce_loss': 0.0,
+                'proto_loss': 0.0,
+                'separation_loss': 0.0
+            }
 
         with torch.no_grad():
             for features, labels in tqdm(self.val_loader, desc="Validating"):
@@ -170,9 +225,21 @@ class Trainer:
                     features = features.to(self.device)
                 labels = labels.to(self.device)
 
-                # Forward pass
-                outputs = self.model(features)
-                loss = self.criterion(outputs, labels)
+                # Forward pass - handle prototypical model
+                if use_prototypical:
+                    outputs, proto_logits, _ = self.model(features, return_embeddings=True)
+                    prototypes = self.model.get_prototypes()
+
+                    # Prototypical loss returns (loss, loss_dict)
+                    loss, loss_dict = self.criterion(outputs, proto_logits, prototypes, labels)
+
+                    # Track loss components
+                    for key in running_loss_components.keys():
+                        if key in loss_dict:
+                            running_loss_components[key] += loss_dict[key].item()
+                else:
+                    outputs = self.model(features)
+                    loss = self.criterion(outputs, labels)
 
                 # Track metrics
                 running_loss += loss.item()
@@ -186,7 +253,7 @@ class Trainer:
         all_labels = torch.cat(all_labels)
         metrics = compute_metrics(all_preds, all_labels)
 
-        return {
+        result = {
             'loss': val_loss,
             'accuracy': metrics['accuracy'],
             'macro_f1': metrics['macro_f1'],
@@ -195,12 +262,24 @@ class Trainer:
             'confusion_matrix': metrics['confusion_matrix']
         }
 
+        # Add loss components to result for prototypical learning
+        if use_prototypical:
+            for key, value in running_loss_components.items():
+                result[f'avg_{key}'] = value / len(self.val_loader)
+
+        return result
+
     def train(self, epochs: int):
         """Main training loop."""
-        logger.info(f"Starting training for {epochs} epochs")
-        logger.info(f"Device: {self.device}")
-        logger.info(f"Train batches: {len(self.train_loader)}")
-        logger.info(f"Val batches: {len(self.val_loader)}")
+        logger.info("Starting training for %d epochs", epochs)
+        logger.info("Device: %s", self.device)
+        logger.info("Train batches: %d", len(self.train_loader))
+        logger.info("Val batches: %d", len(self.val_loader))
+
+        # Log if prototypical learning is enabled
+        use_prototypical = self.config.get('training', {}).get('use_prototypical', False)
+        if use_prototypical:
+            logger.info("Prototypical learning ENABLED with loss component tracking")
 
         for epoch in range(epochs):
             self.current_epoch = epoch
@@ -228,30 +307,48 @@ class Trainer:
             self.writer.add_scalar('Val/Accuracy', val_metrics['accuracy'], epoch)
             self.writer.add_scalar('Val/MacroF1', val_metrics['macro_f1'], epoch)
 
+            # Log prototypical loss components
+            if use_prototypical:
+                for component in ['ce_loss', 'proto_loss', 'separation_loss']:
+                    train_key = f'avg_{component}'
+                    val_key = f'avg_{component}'
+                    if train_key in train_metrics:
+                        self.writer.add_scalar(f'Train/{component}', train_metrics[train_key], epoch)
+                    if val_key in val_metrics:
+                        self.writer.add_scalar(f'Val/{component}', val_metrics[val_key], epoch)
+
             # Print epoch summary
             logger.info(
-                f"Epoch {epoch+1}/{epochs} | "
-                f"Time: {epoch_time:.1f}s | "
-                f"Train Loss: {train_metrics['loss']:.4f} | "
-                f"Val Loss: {val_metrics['loss']:.4f} | "
-                f"Val Acc: {val_metrics['accuracy']*100:.2f}% | "
-                f"Val Macro F1: {val_metrics['macro_f1']*100:.2f}%"
+                "Epoch %d/%d | Time: %.1fs | Train Loss: %.4f | "
+                "Val Loss: %.4f | Val Acc: %.2f%% | Val Macro F1: %.2f%%",
+                epoch + 1, epochs, epoch_time, train_metrics['loss'],
+                val_metrics['loss'], val_metrics['accuracy'] * 100,
+                val_metrics['macro_f1'] * 100
             )
+
+            # Print loss components if prototypical
+            if use_prototypical:
+                logger.info(
+                    "  Loss Components - CE: %.4f | Proto: %.4f | Sep: %.4f",
+                    val_metrics.get('avg_ce_loss', 0),
+                    val_metrics.get('avg_proto_loss', 0),
+                    val_metrics.get('avg_separation_loss', 0)
+                )
 
             # Print per-class F1 scores
             class_names = self.config.get('evaluation', {}).get('class_names', {})
             if class_names:
                 logger.info("Per-class F1 scores:")
                 for class_idx, f1_score in enumerate(val_metrics['per_class_f1']):
-                    class_name = class_names.get(class_idx, f"Class {class_idx}")
-                    logger.info(f"  {class_name}: {f1_score*100:.2f}%")
+                    class_name = class_names.get(class_idx, "Class %d" % class_idx)
+                    logger.info("  %s: %.2f%%", class_name, f1_score * 100)
 
             # Save checkpoint
             metric_for_best = val_metrics.get('macro_f1', val_metrics['accuracy'])
 
             if metric_for_best > self.best_val_metric:
                 self.best_val_metric = metric_for_best
-                logger.info(f"New best model! Macro F1: {metric_for_best*100:.2f}%")
+                logger.info("New best model! Macro F1: %.2f%%", metric_for_best * 100)
 
                 save_checkpoint(
                     model=self.model,
@@ -274,10 +371,10 @@ class Trainer:
             if self.early_stopping is not None:
                 self.early_stopping(metric_for_best)
                 if self.early_stopping.early_stop:
-                    logger.info(f"Early stopping triggered at epoch {epoch+1}")
+                    logger.info("Early stopping triggered at epoch %d", epoch + 1)
                     break
 
         logger.info("Training completed!")
-        logger.info(f"Best validation macro F1: {self.best_val_metric*100:.2f}%")
+        logger.info("Best validation macro F1: %.2f%%", self.best_val_metric * 100)
 
         self.writer.close()
